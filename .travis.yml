@@ -9,7 +9,8 @@ addons:
     - libssl-dev
     - libunwind8
     - zlib1g
-language: python
+    - python
+language: csharp
 python:
   - "3.4"
 # command to install dependencies
