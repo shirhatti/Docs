@@ -75,7 +75,7 @@ We will be modifying the ``/etc/nginx/sites-available/default``, so open it up i
     server {
         listen 80;
         location / {
-            proxy_pass http://unix:/var/aspnet/HelloMVC/kestrel.sock;
+            proxy_pass http://localhost:5000;
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection keep-alive;
@@ -84,16 +84,7 @@ We will be modifying the ``/etc/nginx/sites-available/default``, so open it up i
         }
     }
 
-This is one of the simplest configuration files for Nginx that forwards incoming public traffic on your port ``80`` to a unix socket that your web application will listen on. You can specify this Unix socket in your *project.json* file.
-
-.. code-block:: none
-    :caption: project.json
-
-    "commands": {
-        "web": "Microsoft.AspNetCore.Server.Kestrel --server.urls http://unix:/var/aspnet/HelloMVC/kestrel.sock",
-    },
-
-You might want to look at ``/etc/nginx/nginx.conf`` to configure your nginx environment.
+This is one of the simplest configuration files for Nginx that forwards incoming public traffic on your port ``80`` to a port ``5000`` that your web application will listen on.
 
 Once you have completed making changes to your nginx configuration you can run ``sudo nginx -t`` to verify the syntax of your configuration files. If the configuration file test is successful you can ask nginx to pick up the changes by running ``sudo nginx -s reload``.
 
@@ -125,12 +116,12 @@ To have supervisor monitor our application, we will add a file to the ``/etc/sup
     :caption: /etc/supervisor/conf.d/hellomvc.conf
 
     [program:hellomvc]
-    command=bash /var/aspnet/HelloMVC/approot/web
+    command=bash /usr/bin/dotnet /var/aspnetcore/HelloMVC/HelloMVC.dll
     autostart=true
     autorestart=true
     stderr_logfile=/var/log/hellomvc.err.log
     stdout_logfile=/var/log/hellomvc.out.log
-    environment=Hosting__Environment=Production
+    environment=ASPNETCORE__ENVIRONMENT=Production
     user=www-data
     stopsignal=INT
 
@@ -146,19 +137,6 @@ Start our web application on startup
 
 In our case, since we are using supervisor to manage our application, the application will be automatically started by supervisor. Supervisor uses a System V Init script to run as a daemon on system boot and will susbsequently launch your application. If you chose not to use supervisor or an equivalent tool, you will need to write a ``systemd`` or ``upstart`` or ``SysVinit`` script to start your application on startup.
 
-Recovering from an ungraceful shutdown
---------------------------------------
-
-If your web application is terminated with a ``SIGKILL`` signal or the if host experiences a loss of power, ``Kestrel`` will not shut down gracefully and remove the socket file. To prevent subsequents attempts to restart your application from failing due to ``EADDRINUSE address already in use``, you can modify the shell script used to bootstrap your application to remove the socket file if present.
-
-.. code-block:: bash
-    :caption: /var/aspnet/HelloMVC/approot/web
-
-    if [ -f "/var/aspnet/HelloMVC/kestrel.sock" ]; then
-      rm "/var/aspnet/HelloMVC/kestrel.sock"
-    fi
-
-
 Viewing logs
 ------------
 
@@ -173,4 +151,118 @@ You can redirect application logs (``STDOUT`` and ``STERR``) in the program sect
 .. code-block:: bash
 
     tail -f /var/log/hellomvc.out.log
+
+Securing our application
+------------------------
+
+Enable ``AppArmor``
+~~~~~~~~~~~~~~~~~~~
+Linux Security Modules (LSM) is a framework that is part of the Linux kernel since Linux 2.6 that supports different implementations of security modules. ``AppArmor`` is a LSM that implements a Mandatory Access Control system which allows you to confine program to a limited set of resources. Ensure `AppArmor <https://wiki.ubuntu.com/AppArmor>`__ is enabled and properly configured.
+
+Configuring our firewall
+~~~~~~~~~~~~~~~~~~~~~~~~
+Close off all external ports that are not in use. Uncomplicated firewall (ufw) provides a frontend for ``iptables`` by providing a command-line interface for configuring the firewall. Ensure that ``ufw`` is installed and available and configured allow traffic on any ports you may need.
+
+.. code-block:: bash
+
+    sudo apt-get install ufw
+    sudo ufw enable
+
+    sudo ufw allow 80/tcp
+    sudo ufw allow 443/tcp
+
+Securing Nginx
+~~~~~~~~~~~~~~
+
+The default distribution of Nginx isn't configured securely with SSL enabled. To ensure we have all the security features we want, we will build from source.
+
+Download the source and install the build dependencies
+``````````````````````````````````````````````````````
+
+.. code-block:: bash
+
+    # Install the build dependencies
+    sudo apt-get update
+    sudo apt-get install build-essential zlib1g-dev libpcre3-dev libssl-dev libxslt1-dev libxml2-dev libgd2-xpm-dev libgeoip-dev libgoogle-perftools-dev libperl-dev
+
+    # Download nginx 1.10.0 or latest
+    wget http://www.nginx.org/download/nginx-1.10.0.tar.gz
+    tar zxf nginx-1.10.0.tar.gz
+
+Change the Nginx response name
+``````````````````````````````
+
+Edit *src/http/ngx_http_header_filter_module.c*
+
+.. code-block:: c
+
+    static char ngx_http_server_string[] = "Server: Your Web Server" CRLF;
+    static char ngx_http_server_full_string[] = "Server: Your Web Server" CRLF;
+
+
+Configure the options and build
+```````````````````````````````
+
+The PCRE library is required for regular expressions in the location directive for the ngx_http_rewrite_module. The http_ssl_module adds HTTPS protocol support.
+
+You should also considering using a web application firewall like `ModSecurity` to further harden your application.
+
+.. code-block:: bash
+
+    ./configure
+    --with-pcre=../pcre-8.38
+    --with-zlib=../zlib-1.2.8
+    --with-http_ssl_module
+    --with-stream
+    --with-mail=dynamic
+
+Configure SSL
+`````````````
+Configure your server to listen to HTTPS traffic on port ``443`` by specifying a valid certificate verified by a trusted Certificate Authority (CA). Harden your security by employing some of the practices suggested below like choosing a stronger cipher.
+
+Do not add the Strict-Transport-Security header if you plan to disable SSL in the future
+
+.. code-block:: nginx
+
+    server {
+        listen *:443    ssl;
+        server_name     localhost;
+        ssl_certificate /etc/ssl/certs/testCert.crt;
+        ssl_certificate_key /etc/ssl/certs/testCert.key;
+        ssl_protocols TLSv1.1 TLSv1.2;
+        ssl_prefer_server_ciphers on;
+        ssl_ciphers "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH";
+        ssl_ecdh_curve secp384r1;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_tickets off;
+        #ssl_stapling on; #ensure your cert is capable
+        #ssl_stapling_verify on; #ensure your cert is capable
+
+        add_header Strict-Transport-Security "max-age=63072000;
+        includeSubdomains;
+
+        add_header X-Frame-Options DENY;
+        add_header X-Content-Type-Options nosniff;
+
+        #Redirects all traffic
+        location / {
+            proxy_pass  http://localhost:5000;
+            limit_req   zone=one burst=10;
+        }
+    }
+
+
+Additionally, you can redirect all traffic over HTTP to HTTPS.
+
+.. code-block:: nginx
+   :emphasize-lines: 7
+
+    server {
+        listen *:80;
+        add_header Strict-Transport-Security max-age=15768000;
+        return 301 https://<URL>;
+    }
+
+
+
 
